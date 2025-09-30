@@ -7,7 +7,7 @@ import numpy as np
 # ASSUMPTIONS
 # Using a marginalizing timing model
 # Plain noise model - uses pre-v1 caching
-# Only computes the noise-marginalized per-frequency pair-covariant OS - no maximum likelihood, no mutliple component, no non-pair-covariant
+# Only computes the noise-marginalized per-frequency pair-covariant OS - no maximum likelihood, no multiple component, no non-pair-covariant
 
 # hasn't been tested extremely thoroughly but I computed a few draws and they pass np.allclose with atol=0 when compared to official defiant
 # (apparently the default atol is not suitable for comparing very small numbers as described in the NumPy documentation, so I set it to 0)
@@ -17,7 +17,7 @@ import numpy as np
 # import jax.numpy as jnp
 # from defiant import nmpfpcos_jax as nj
 # <load your pulsars and pta and lfcore here>
-# npsrs, Fndt, TNdt, TNT, FNT, FNF, pair_idx, xi = nj.cpu_cache(psrs, pta, lfcore)
+# npsrs, FNdt, TNdt, TNT, FNT, FNF, pair_idx, xi = nj.cpu_cache(psrs, pta, lfcore)
 # N = 20 # number of noise draws
 # frequencies = jnp.array([1,3,7]) # or whatever frequencies you want. 
 # could be e.g. jnp.array([4]) for single-frequency or jnp.arange for the whole spectrum
