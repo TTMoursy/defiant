@@ -17,7 +17,7 @@ import numpy as np
 # import jax.numpy as jnp
 # from defiant import nmpfpcos_jax as nj
 # <load your pulsars and pta and lfcore here>
-# npsrs, FNdt, TNdt, TNT, FNT, FNF, pair_idx, xi = nj.cpu_cache(psrs, pta, lfcore)
+# npsrs, FNdt, TNdt, TNT, FNT, FNF, pair_idx, xi = nj.cpu_cache(psrs, pta)
 # N = 20 # number of noise draws
 # frequencies = jnp.array([1,3,7]) # or whatever frequencies you want. 
 # could be e.g. jnp.array([4]) for single-frequency or jnp.arange for the whole spectrum
@@ -25,7 +25,7 @@ import numpy as np
 # rhok, sigk, Sk, Ck = nj.gpu_nmpfpcos(FNdt, TNdt, TNT, FNT, FNF, phiinv, pair_idx, xi, phi, frequencies) # this part uses the GPU if there is one 
 
 # run this once first, can use the results for any frequency and noise draw
-def cpu_cache(psrs, pta, lfcore):
+def cpu_cache(psrs, pta):
     npsrs = len(psrs)
     pair_idx = np.array(np.triu_indices(npsrs,1)).T
     xi = np.arccos([np.dot(psrs[a].pos, psrs[b].pos) for (a,b) in pair_idx])
