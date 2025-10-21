@@ -1,5 +1,6 @@
 import jax
 jax.config.update("jax_enable_x64", True) # switch to 64-bit precision
+from jax.lax import dynamic_slice
 import jax.numpy as jnp
 
 import numpy as np
@@ -76,7 +77,7 @@ def cpu_prep(npsrs, pta, lfcore, N, frequencies):
 
 # this runs on GPU or CPU; pass it the outputs of the previous two functions
 @jax.jit
-def gpu_nmpfpcos(FNdt, TNdt, TNT, FNT, FNF, phiinv, pair_idx, xi, phi, frequencies):
+def gpu_nmpfpcos(FNdt, TNdt, TNT, FNT, FNF, phiinv,  pair_idx, xi, phi, frequencies):
     X, Z = jax.vmap(jax.vmap(compute_XZ, in_axes=(0,0,0,0,0,0)), in_axes=(None,None,None,None,None,0))(FNdt, TNdt, TNT, FNT, FNF, phiinv) # vmap over noise draws and pulsars
     # orf matrix and orf design matrix
     def hd(xi): # only valid for cross-correlations; could do jnp.where(xi==0, 1, .5 - stuff) if want a general HD function
@@ -87,15 +88,18 @@ def gpu_nmpfpcos(FNdt, TNdt, TNT, FNT, FNF, phiinv, pair_idx, xi, phi, frequenci
     orf_matrix = jnp.ones((X.shape[1],X.shape[1])).at[a,b].set(hd_of_xi).at[b,a].set(hd_of_xi)
     orf_design_matrix = hd_of_xi
 
-    phi_til = jnp.zeros(X.shape[2]//2)
-
     a,b = pair_idx[:,0], pair_idx[:,1]
+    N = jnp.arange(Z.shape[0])
     def ZphiZphihat_n(n): # ZphiZphihat for a single noise-draw n
         ZphiZphihat = jnp.zeros((Z.shape[1],Z.shape[1], Z.shape[2],Z.shape[2]))
         ZphiZphihat = ZphiZphihat.at[a,b].set(((phi[n]*Z[n,a]) @ Z[n,b]))
         ZphiZphihat = ZphiZphihat.at[b,a].set(((phi[n]*Z[n,b]) @ Z[n,a]))
         return ZphiZphihat
-    ZphiZphihat = jax.vmap(ZphiZphihat_n)(jnp.arange(Z.shape[0])) # vmap over noise draws
+    ZphiZphihat = jax.vmap(ZphiZphihat_n)(N) # vmap over noise draws
+
+    def Zphi_n(n): # phi*Z for a single noise-draw n
+        return phi[n]*Z[n]
+    Zphi = jax.vmap(Zphi_n)(N)
 
     npair = Z.shape[1]*(Z.shape[1]-1)//2
     PoP_idx = jnp.array(jnp.triu_indices(npair)).T
@@ -104,9 +108,9 @@ def gpu_nmpfpcos(FNdt, TNdt, TNT, FNT, FNF, phiinv, pair_idx, xi, phi, frequenci
     PoP = PoP.at[:,(0,1)].set(pair_idx[PoP_idx[:,0]])
     PoP = PoP.at[:,(2,3)].set(pair_idx[PoP_idx[:,1]])
 
-    # It is also helpful to create some basic filters. (Kyle)
-    psr_match = (PoP[:,(0,1)] == PoP[:,(2,3)]) # checks (a==c,b==d) (Kyle)
-    psr_inv_match = (PoP[:,(0,1)] == PoP[:,(3,2)]) # checks (a==d,b==c) (Kyle)
+    # It is also helpful to create some basic filters. (leftover useful comment from Kyle)
+    psr_match = (PoP[:,(0,1)] == PoP[:,(2,3)]) # checks (a==c,b==d) (leftover useful comment from Kyle)
+    psr_inv_match = (PoP[:,(0,1)] == PoP[:,(3,2)]) # checks (a==d,b==c) (leftover useful comment from Kyle)
 
     conditions = [psr_match[:,0] & psr_match[:,1],
                   psr_match[:,0] & ~psr_match[:,1],
@@ -117,19 +121,21 @@ def gpu_nmpfpcos(FNdt, TNdt, TNT, FNT, FNF, phiinv, pair_idx, xi, phi, frequenci
     a_PoP,b_PoP,c_PoP,d_PoP = PoP.T
 
     # a single-frequency PCOS
-    def pcos(X, Z, ZphiZphihat, orf_matrix, phi, k):
-        rho, sig, norm = compute_rhok_sigk(a, b, phi_til, X, Z, phi, k)
+    def pcos(X, Z, ZphiZphihat, orf_matrix, phi, Zphi, k):
+        # select the 2x2 frequency patch -- seems to save memory
+        Xphihat = dynamic_slice(X, (0,2*k), (X.shape[0],2))
+        Zphihat = dynamic_slice(Z, (0,2*k,2*k), (Z.shape[0],2,2))
+        rho, sig, norm = compute_rhok_sigk(a, b, Xphihat, Zphihat, Z, phi, Zphi, k)
         s_diag = jnp.diag(sig**2)
         # select the 2x2 frequency patch -- seems to save memory
-        Zphihat = jnp.zeros((Z.shape[0],2,2)).at[:,0,0].set(Z[:,2*k,2*k]).at[:,0,1].set(Z[:,2*k,2*k+1]).at[:,1,0].set(Z[:,2*k+1,2*k]).at[:,1,1].set(Z[:,2*k+1,2*k+1])
-        ZphiZphihat = jnp.zeros((Z.shape[0],Z.shape[0],2,2)).at[:,:,0,0].set(ZphiZphihat[:,:,2*k,2*k]).at[:,:,0,1].set(ZphiZphihat[:,:,2*k,2*k+1]).at[:,:,1,0].set(ZphiZphihat[:,:,2*k+1,2*k]).at[:,:,1,1].set(ZphiZphihat[:,:,2*k+1,2*k+1])
+        ZphiZphihat = dynamic_slice(ZphiZphihat, (0,0,2*k,2*k), (Z.shape[0],Z.shape[0],2,2))
         C = create_PFOS_pair_covariance(Zphihat, ZphiZphihat, orf_matrix, norm, conditions, p_idx1,p_idx2, a_PoP,b_PoP,c_PoP,d_PoP)
         S = woodbury_linear_solve(orf_design_matrix, C, rho, s_diag)
         return rho, sig, S, C
     
-    pfpcos = jax.vmap(pcos, in_axes=(None,None,None,None,None,0)) # vmap over frequencies
-    nmpfpcos = jax.vmap(pfpcos, in_axes=(0,0,0,None,0,None)) # vmap over noise draws
-    rhok, sigk, Sk, Ck = nmpfpcos(X, Z, ZphiZphihat, orf_matrix, phi, frequencies)
+    pfpcos = jax.vmap(pcos, in_axes=(None,None,None,None,None,None,0)) # vmap over frequencies
+    nmpfpcos = jax.vmap(pfpcos, in_axes=(0,0,0,None,0,0,None)) # vmap over noise draws
+    rhok, sigk, Sk, Ck = nmpfpcos(X, Z, ZphiZphihat, orf_matrix, phi, Zphi, frequencies)
     return rhok, sigk, Sk[:,:,0,0], Ck
 
 def compute_XZ(FNdt, TNdt, TNT, FNT, FNF, phiinv):
@@ -138,18 +144,14 @@ def compute_XZ(FNdt, TNdt, TNT, FNT, FNF, phiinv):
     Z = FNF - FNT @ jnp.linalg.solve(sigma, FNT.T)
     return X, Z
 
-def compute_rhok_sigk(a, b, phi_til, X, Z, phi, freq):
+def compute_rhok_sigk(a, b, Xphihat, Zphihat, Z, phi, Zphi, k):
+    Zaslice = dynamic_slice(Z, (0,0,2*k), (Z.shape[0],Z.shape[1],2))
+    Zbslice = dynamic_slice(Zphi, (0,2*k,0), (Z.shape[0],2,Z.shape[2]))
 
-    # Compute rho_ab(f_{freq}), sigma_ab(f_{freq}), and normalization_ab(f_{freq}) (Kyle)
+    norms_abk = phi[2*k]/mpt(Zaslice[a], Zbslice[b])
 
-    phi_til = phi_til.at[freq].set(1)
-    phi_til = jnp.repeat(phi_til,2)
-    phi2 = phi/phi[2*freq]
-
-    norms_abk = 1/(jnp.einsum('ijk,ikj->i',phi_til*Z[a],phi2*Z[b]))
-
-    rho_abk =  jnp.sum(X[a] * phi_til * X[b], axis=1) * norms_abk
-    sig_abk =  jnp.sqrt(jnp.einsum('ijk,ikj->i', phi_til*Z[a], phi_til*Z[b]) * norms_abk**2)
+    rho_abk =  jnp.sum(Xphihat[a] * Xphihat[b], axis=1) * norms_abk
+    sig_abk =  jnp.sqrt(mpt(Zphihat[a], Zphihat[b]) * norms_abk**2)
 
     return rho_abk, sig_abk, norms_abk
 
@@ -181,7 +183,7 @@ def woodbury_inverse(A, U, C, V):
 
 def create_PFOS_pair_covariance(Zphihat, ZphiZphihat, orf, norm_ab, conditions, p_idx1,p_idx2, a,b,c,d):
 
-    # Define the three cases for the pair covariance (Kyle - the rest of the comments in this function)
+    # Define the three cases for the pair covariance (leftover useful comment from Kyle - same for the rest of the comments in this function)
     def case1(a,b,c,d):             #(ab,cd)
         # = gamma_{ac} gamma_{bd} tr([Z_d phi Z_b] phihat [Z_a phi Z_c] phihat) + 
         #   gamma_{ad} gamma_{bc} tr([Z_c phi Z_b] phihat [Z_a phi Z_d] phihat)
